@@ -6,6 +6,13 @@ The first SDK module sends deployment and website-change context to [ViewMend Si
 
 This package supports JavaScript website change monitoring, TypeScript deployment monitoring, Node.js Site Tracker integration, and Vercel deployment monitoring without a framework runtime dependency.
 
+## Documentation
+
+- [ViewMend Site Tracker](https://viewmend.com/site-tracker)
+- [Events API setup guide](https://viewmend.com/guides/integrations/events-api)
+- [All ViewMend integrations](https://viewmend.com/guides/integrations)
+- [SDK issues and feature requests](https://github.com/phpner/viewmend-js/issues)
+
 ## Installation
 
 ```bash
@@ -16,19 +23,27 @@ The package has zero runtime dependencies. It provides ESM and CommonJS entry po
 
 ## 30-second quick start
 
-Create a custom Events API connection in Site Tracker, then keep the generated token and integration ID in server-side environment variables.
+Create a custom Events API connection by following the [Events API setup guide](https://viewmend.com/guides/integrations/events-api), then keep the generated token and integration ID in server-side environment variables.
 
-```ts
+```js
 import { ViewMend } from '@viewmend/sdk';
 
+const apiToken = process.env.VIEWMEND_API_TOKEN;
+const integrationId = process.env.VIEWMEND_INTEGRATION_ID;
+const deploymentId = process.env.VERCEL_DEPLOYMENT_ID;
+
+if (!apiToken || !integrationId || !deploymentId) {
+  throw new Error('Missing required ViewMend environment variables.');
+}
+
 const viewmend = new ViewMend({
-  apiToken: process.env.VIEWMEND_API_TOKEN!,
+  apiToken,
 });
 
 const result = await viewmend
-  .siteTracker(process.env.VIEWMEND_INTEGRATION_ID!)
+  .siteTracker(integrationId)
   .events.deployment({
-    id: process.env.VERCEL_DEPLOYMENT_ID!,
+    id: deploymentId,
     title: 'Production deployment',
     siteUrl: 'https://example.com',
     pageUrls: ['https://example.com/'],
