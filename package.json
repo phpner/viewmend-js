@@ -23,10 +23,6 @@
     "type": "git",
     "url": "git+https://github.com/phpner/viewmend-js.git"
   },
-  "funding": {
-    "type": "individual",
-    "url": "https://viewmend.com/credits"
-  },
   "author": {
     "name": "ViewMend",
     "email": "support@viewmend.com",

@@ -568,6 +568,36 @@ describe('retries, timeout, and cancellation', () => {
     );
   });
 
+  test('keeps the attempt timeout active while reading a response body', async () => {
+    let calls = 0;
+    let bodyReads = 0;
+    let releaseBody = () => {};
+    const request = client(
+      async () => {
+        calls += 1;
+        const response = successResponse();
+        response.text = async () => {
+          bodyReads += 1;
+          return new Promise((resolve) => {
+            releaseBody = () => resolve(JSON.stringify(successBody));
+          });
+        };
+        return response;
+      },
+      { timeoutMs: 20 },
+    )
+      .siteTracker('integration')
+      .events.custom({ id: 'body-timeout-id', title: 'Body timeout' });
+
+    try {
+      await assert.rejects(request, ViewMendTimeoutError);
+    } finally {
+      releaseBody();
+    }
+    assert.equal(calls, 1);
+    assert.equal(bodyReads, 1);
+  });
+
   test('composes a caller AbortSignal with the timeout and never retries cancellation', async () => {
     let calls = 0;
     const controller = new AbortController();
@@ -589,6 +619,41 @@ describe('retries, timeout, and cancellation', () => {
     controller.abort();
 
     await assert.rejects(request, ViewMendAbortError);
+    assert.equal(calls, 1);
+  });
+
+  test('cancels an in-progress response body read without retrying', async () => {
+    let calls = 0;
+    let releaseBody = () => {};
+    let markBodyStarted;
+    const bodyStarted = new Promise((resolve) => {
+      markBodyStarted = resolve;
+    });
+    const controller = new AbortController();
+    const request = client(
+      async () => {
+        calls += 1;
+        const response = successResponse();
+        response.text = async () => {
+          markBodyStarted();
+          return new Promise((resolve) => {
+            releaseBody = () => resolve(JSON.stringify(successBody));
+          });
+        };
+        return response;
+      },
+      { timeoutMs: 1000, retry: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 2 } },
+    )
+      .siteTracker('integration')
+      .events.custom({ id: 'body-abort-id', title: 'Body abort', signal: controller.signal });
+
+    await bodyStarted;
+    controller.abort();
+    try {
+      await assert.rejects(request, ViewMendAbortError);
+    } finally {
+      releaseBody();
+    }
     assert.equal(calls, 1);
   });
 });

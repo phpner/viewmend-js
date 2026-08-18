@@ -5,6 +5,7 @@ import {
   ViewMendAuthorizationError,
   ViewMendConflictError,
   ViewMendEndpointDisabledError,
+  ViewMendError,
   ViewMendInvalidResponseError,
   ViewMendNetworkError,
   ViewMendNotFoundError,
@@ -25,8 +26,11 @@ const ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{
 interface AttemptSignal {
   readonly signal: AbortSignal;
   readonly cleanup: () => void;
+  readonly abortedByCaller: () => boolean;
   readonly timedOut: () => boolean;
 }
+
+class AttemptAbortedError extends Error {}
 
 export class HttpTransport {
   readonly #config: ValidatedClientConfig;
@@ -54,61 +58,62 @@ export class HttpTransport {
       }
 
       const attemptSignal = createAttemptSignal(signal, this.#config.timeoutMs);
-      let response: Response;
+      let mayRetryAttemptFailure = true;
+      let retryDelayMs: number | undefined;
       try {
-        response = await this.#config.fetch(url, {
-          method: 'POST',
-          headers: this.#headers(),
-          body,
-          signal: attemptSignal.signal,
-        });
-      } catch {
-        attemptSignal.cleanup();
-        if (signal?.aborted) {
-          throw new ViewMendAbortError('The ViewMend request was cancelled.');
-        }
-
-        const error = attemptSignal.timedOut()
-          ? new ViewMendTimeoutError('The ViewMend request timed out.')
-          : new ViewMendNetworkError('The ViewMend API could not be reached.');
-        if (attempt >= this.#config.retry.maxAttempts) {
-          throw error;
-        }
-        await waitForRetry(this.#retryDelay(attempt), signal);
-        continue;
-      }
-      attemptSignal.cleanup();
-
-      if (!isResponseLike(response)) {
-        throw new ViewMendInvalidResponseError('ViewMend returned an invalid HTTP response.', 0);
-      }
-
-      if (TRANSIENT_STATUSES.has(response.status) && attempt < this.#config.retry.maxAttempts) {
-        const retryAfterMs =
-          response.status === 429
-            ? parseRetryAfter(response.headers.get('Retry-After'))
-            : undefined;
-        await discardResponse(response);
-        await waitForRetry(
-          Math.min(retryAfterMs ?? this.#retryDelay(attempt), this.#config.retry.maxDelayMs),
-          signal,
+        const response = await awaitWithSignal(
+          this.#config.fetch(url, {
+            method: 'POST',
+            headers: this.#headers(),
+            body,
+            signal: attemptSignal.signal,
+          }),
+          attemptSignal.signal,
         );
-        continue;
-      }
 
-      if (response.status === 200 || response.status === 202) {
-        try {
-          return parseSuccess(response, await readBoundedBody(response));
-        } catch (error) {
-          if (error instanceof ViewMendNetworkError && attempt < this.#config.retry.maxAttempts) {
-            await waitForRetry(this.#retryDelay(attempt), signal);
-            continue;
-          }
-          throw error;
+        if (!isResponseLike(response)) {
+          throw new ViewMendInvalidResponseError('ViewMend returned an invalid HTTP response.', 0);
         }
+
+        if (TRANSIENT_STATUSES.has(response.status) && attempt < this.#config.retry.maxAttempts) {
+          const retryAfterMs =
+            response.status === 429
+              ? parseRetryAfter(response.headers.get('Retry-After'))
+              : undefined;
+          retryDelayMs = Math.min(
+            retryAfterMs ?? this.#retryDelay(attempt),
+            this.#config.retry.maxDelayMs,
+          );
+          await awaitWithSignal(discardResponse(response), attemptSignal.signal);
+        } else if (response.status === 200 || response.status === 202) {
+          const responseBody = await awaitWithSignal(
+            readBoundedBody(response),
+            attemptSignal.signal,
+          );
+          return parseSuccess(response, responseBody);
+        } else {
+          mayRetryAttemptFailure = false;
+          throw await awaitWithSignal(mapApiError(response), attemptSignal.signal);
+        }
+      } catch (error) {
+        const normalizedError = normalizeAttemptError(error, attemptSignal);
+        if (
+          (normalizedError instanceof ViewMendNetworkError ||
+            normalizedError instanceof ViewMendTimeoutError) &&
+          mayRetryAttemptFailure &&
+          attempt < this.#config.retry.maxAttempts
+        ) {
+          retryDelayMs ??= this.#retryDelay(attempt);
+        } else {
+          throw normalizedError;
+        }
+      } finally {
+        attemptSignal.cleanup();
       }
 
-      throw await mapApiError(response);
+      if (retryDelayMs !== undefined) {
+        await waitForRetry(retryDelayMs, signal);
+      }
     }
 
     throw new ViewMendNetworkError('The ViewMend API could not be reached.');
@@ -163,22 +168,68 @@ function createAttemptSignal(
   timeoutMs: number,
 ): AttemptSignal {
   const controller = new AbortController();
+  let didAbortByCaller = false;
   let didTimeout = false;
   const timeout = setTimeout(() => {
+    if (controller.signal.aborted) return;
     didTimeout = true;
     controller.abort();
   }, timeoutMs);
-  const abort = (): void => controller.abort();
-  userSignal?.addEventListener('abort', abort, { once: true });
+  const abort = (): void => {
+    if (controller.signal.aborted) return;
+    didAbortByCaller = true;
+    controller.abort();
+  };
+  if (userSignal?.aborted) {
+    abort();
+  } else {
+    userSignal?.addEventListener('abort', abort, { once: true });
+  }
 
   return {
     signal: controller.signal,
+    abortedByCaller: () => didAbortByCaller,
     timedOut: () => didTimeout,
     cleanup: () => {
       clearTimeout(timeout);
       userSignal?.removeEventListener('abort', abort);
     },
   };
+}
+
+function awaitWithSignal<T>(operation: PromiseLike<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(new AttemptAbortedError());
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abort);
+      callback();
+    };
+    const abort = (): void => finish(() => reject(new AttemptAbortedError()));
+    signal.addEventListener('abort', abort, { once: true });
+    Promise.resolve(operation).then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
+function normalizeAttemptError(error: unknown, attemptSignal: AttemptSignal): ViewMendError {
+  if (attemptSignal.abortedByCaller()) {
+    return new ViewMendAbortError('The ViewMend request was cancelled.');
+  }
+  if (attemptSignal.timedOut()) {
+    return new ViewMendTimeoutError('The ViewMend request timed out.');
+  }
+  if (error instanceof ViewMendError) {
+    return error;
+  }
+  return new ViewMendNetworkError('The ViewMend API could not be reached.');
 }
 
 async function readBoundedBody(response: Response): Promise<string> {
