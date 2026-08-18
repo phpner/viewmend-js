@@ -1,0 +1,89 @@
+{
+  "name": "@viewmend/sdk",
+  "version": "1.0.0",
+  "description": "Official JavaScript and TypeScript SDK for ViewMend APIs, including server-side Site Tracker events.",
+  "keywords": [
+    "api-client",
+    "change-monitoring",
+    "deployment-monitoring",
+    "javascript-sdk",
+    "nodejs",
+    "site-tracker",
+    "typescript-sdk",
+    "vercel",
+    "viewmend",
+    "website-monitoring"
+  ],
+  "homepage": "https://viewmend.com/",
+  "bugs": {
+    "url": "https://github.com/phpner/viewmend-js/issues",
+    "email": "support@viewmend.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/phpner/viewmend-js.git"
+  },
+  "funding": {
+    "type": "individual",
+    "url": "https://viewmend.com/credits"
+  },
+  "author": {
+    "name": "ViewMend",
+    "email": "support@viewmend.com",
+    "url": "https://viewmend.com/"
+  },
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      },
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": "^22.0.0 || ^24.0.0 || ^26.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "overrides": {
+    "esbuild": "0.27.2"
+  },
+  "scripts": {
+    "build": "tsup",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && npm run test:unit",
+    "test:unit": "node --test --test-reporter=spec test/*.test.mjs",
+    "edge:smoke": "tsup test/fixtures/edge-consumer.ts --format esm --platform browser --out-dir .tmp/edge --clean --no-dts --minify && node scripts/edge-smoke.mjs",
+    "pack:check": "node scripts/pack-check.mjs",
+    "security:scan": "node scripts/security-scan.mjs",
+    "quality": "npm run format:check && npm run lint && npm run typecheck && npm run build && npm run test:unit && npm run edge:smoke && npm run pack:check && npm run security:scan",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.9",
+    "tsup": "8.5.1",
+    "typescript": "5.9.3"
+  }
+}
