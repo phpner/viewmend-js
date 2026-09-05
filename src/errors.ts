@@ -19,17 +19,24 @@ export class ViewMendValidationError extends ViewMendError {
 export class ViewMendApiError extends ViewMendError {
   public readonly statusCode: number;
   public readonly deliveryId: string | undefined;
+  public readonly requestId: string | undefined;
 
-  public constructor(message: string, statusCode: number, deliveryId?: string) {
+  public constructor(message: string, statusCode: number, deliveryId?: string, requestId?: string) {
     super(message);
     this.statusCode = statusCode;
     this.deliveryId = deliveryId;
+    this.requestId = requestId;
   }
 }
 
 export class ViewMendAuthenticationError extends ViewMendApiError {}
+export class ViewMendTokenScopeError extends ViewMendAuthenticationError {}
+export class ViewMendUnprocessableRegistrationError extends ViewMendApiError {}
+export class ViewMendCallbackVerificationError extends ViewMendError {}
 export class ViewMendAuthorizationError extends ViewMendApiError {}
 export class ViewMendNotFoundError extends ViewMendApiError {}
+export class ViewMendResourceNotFoundError extends ViewMendNotFoundError {}
+export class ViewMendUnprocessableQueryError extends ViewMendApiError {}
 export class ViewMendConflictError extends ViewMendApiError {}
 export class ViewMendEndpointDisabledError extends ViewMendApiError {}
 export class ViewMendPayloadTooLargeError extends ViewMendApiError {}
@@ -56,8 +63,9 @@ export class ViewMendRateLimitError extends ViewMendApiError {
     statusCode: number,
     deliveryId: string | undefined,
     retryAfterMs: number | undefined,
+    requestId?: string,
   ) {
-    super(message, statusCode, deliveryId);
+    super(message, statusCode, deliveryId, requestId);
     this.retryAfterMs = retryAfterMs;
   }
 }

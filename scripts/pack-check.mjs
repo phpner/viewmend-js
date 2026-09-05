@@ -21,8 +21,9 @@ try {
   const [pack] = JSON.parse(packOutput);
   assert.ok(pack, 'npm pack did not return package metadata.');
   assert.ok(pack.size < 100_000, `Packed package is too large: ${pack.size} bytes.`);
+  // Includes all module declarations and readable source maps; runtime dependencies remain zero.
   assert.ok(
-    pack.unpackedSize < 300_000,
+    pack.unpackedSize < 500_000,
     `Unpacked package is too large: ${pack.unpackedSize} bytes.`,
   );
 
@@ -105,6 +106,29 @@ const input = { id: 'typed-id', title: 'Typed smoke', pageUrls: ['https://exampl
 const sdk = new ViewMend({ apiToken: 'typed-test-value', fetch: async () => new Response() });
 const delivery: Promise<SiteTrackerDeliveryResult> = sdk.siteTracker('integration').events.deployment(input);
 void delivery;
+const dashboard: Promise<import('@viewmend/sdk').SiteTrackerDashboardResult> = sdk.siteTracker('integration').dashboard({ device: 'mobile' });
+const resources: Promise<import('@viewmend/sdk').SiteTrackerResourcesResult> = sdk.siteTracker('integration').resources({ runId: 'run', type: 'images', perPage: 300 });
+const registration: Promise<import('@viewmend/sdk').CronRegistrationResult> = sdk.cron().register({ cron: '* * * * *', timezone: 'UTC', endpointPath: '/cron' });
+const current: Promise<import('@viewmend/sdk').CronRegistrationResult | null> = sdk.cron().current();
+const disabled: Promise<void> = sdk.cron().disable();
+const callback: Promise<import('@viewmend/sdk').CronCallback> = sdk.cron().verifyCallback(new Headers(), new Uint8Array());
+void [dashboard, resources, registration, current, disabled, callback];
+// @ts-expect-error device selection is closed for requests
+sdk.siteTracker('integration').dashboard({ device: 'tablet' });
+// @ts-expect-error a resource category is required
+sdk.siteTracker('integration').resources({ runId: 'run' });
+// @ts-expect-error neutral Cron does not accept integration metadata
+sdk.cron().register({ cron: '* * * * *', timezone: 'UTC', endpointPath: '/cron', plugin: {} });
+dashboard.then((value) => {
+  const score: number | null = value.summary.healthScore;
+  const date: string = value.generatedAt;
+  const pages: readonly import('@viewmend/sdk').SiteTrackerTrackedPageSummary[] = value.scope.availablePages;
+  void [score, date, pages];
+  // @ts-expect-error nested results are immutable
+  value.summary.healthScore = 1;
+  // @ts-expect-error collections are immutable
+  value.scope.availablePages.push({});
+});
 `,
   );
   writeFileSync(
@@ -113,6 +137,10 @@ void delivery;
 const input = { id: 'typed-cjs-id', title: 'Typed CJS smoke' } satisfies SiteTrackerEventInput;
 const sdk = new ViewMend({ apiToken: 'typed-cjs-test-value', fetch: async () => new Response() });
 void sdk.siteTracker('integration').events.custom(input);
+const dashboard: Promise<import('@viewmend/sdk').SiteTrackerDashboardResult> = sdk.siteTracker('integration').dashboard();
+const resources: Promise<import('@viewmend/sdk').SiteTrackerResourcesResult> = sdk.siteTracker('integration').resources({ runId: 'run', type: 'css' });
+const current: Promise<import('@viewmend/sdk').CronRegistrationResult | null> = sdk.cron().current();
+void [dashboard, resources, current];
 `,
   );
   writeFileSync(
@@ -133,6 +161,39 @@ void sdk.siteTracker('integration').events.custom(input);
 
   execFileSync(process.execPath, ['esm.mjs'], { cwd: consumer, stdio: 'pipe' });
   execFileSync(process.execPath, ['cjs.cjs'], { cwd: consumer, stdio: 'pipe' });
+  const dashboardFixture = readFileSync(
+    join(projectRoot, 'test/fixtures/site-tracker-empty-dashboard.json'),
+    'utf8',
+  );
+  const resourcesFixture = readFileSync(
+    join(projectRoot, 'test/fixtures/site-tracker-empty-resources.json'),
+    'utf8',
+  );
+  const modulesSmoke = `
+(async () => {
+  const sdk = new ViewMend({ apiToken: 'module-test-value', retry: false, fetch: async (url, init) => {
+    if (url.includes('/dashboard?')) return new Response(JSON.stringify(${dashboardFixture}));
+    if (url.includes('/resources?')) return new Response(JSON.stringify(${resourcesFixture}));
+    if (init.method === 'DELETE') return new Response(null, { status: 204 });
+    return new Response('{"error":{"code":"registration_not_found"}}', { status: 404 });
+  } });
+  const dashboard = await sdk.siteTracker('integration').dashboard();
+  if (dashboard.scope.page !== null || !Object.isFrozen(dashboard.scope)) throw new Error('Dashboard smoke failed');
+  const resources = await sdk.siteTracker('integration').resources({ runId: 'run', type: 'other' });
+  if (resources.items.length !== 0 || resources.pagination.lastPage !== 1) throw new Error('Resources smoke failed');
+  if (await sdk.cron().current() !== null) throw new Error('Cron read smoke failed');
+  await sdk.cron().disable();
+  const token = 'vmcron1_cronconn_' + 'a'.repeat(26) + '_' + 'b'.repeat(64) + '_' + 'c'.repeat(64);
+  if (!Object.isFrozen(CronCallbackVerifier.fromToken(token))) throw new Error('Verifier export smoke failed');
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+`;
+  for (const [name, imports] of [
+    ['modules.mjs', "import { ViewMend, CronCallbackVerifier } from '@viewmend/sdk';"],
+    ['modules.cjs', "const { ViewMend, CronCallbackVerifier } = require('@viewmend/sdk');"],
+  ]) {
+    writeFileSync(join(consumer, name), imports + modulesSmoke);
+    execFileSync(process.execPath, [name], { cwd: consumer, stdio: 'pipe' });
+  }
   const tsc = join(projectRoot, 'node_modules', 'typescript', 'bin', 'tsc');
   execFileSync(process.execPath, [tsc, '--project', 'tsconfig.json'], {
     cwd: consumer,

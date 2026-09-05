@@ -11,9 +11,13 @@ import {
   ViewMendNotFoundError,
   ViewMendPayloadTooLargeError,
   ViewMendRateLimitError,
+  ViewMendResourceNotFoundError,
   ViewMendServerError,
   ViewMendTimeoutError,
+  ViewMendTokenScopeError,
   ViewMendUnprocessableEventError,
+  ViewMendUnprocessableQueryError,
+  ViewMendUnprocessableRegistrationError,
 } from '../errors.js';
 import type { SiteTrackerDeliveryResult, SiteTrackerEventType } from '../types.js';
 import { exponentialDelay, parseRetryAfter, TRANSIENT_STATUSES, waitForRetry } from './retry.js';
@@ -31,6 +35,15 @@ interface AttemptSignal {
 }
 
 class AttemptAbortedError extends Error {}
+
+interface ApiRequest<T> {
+  readonly method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  readonly path: string;
+  readonly body?: string;
+  readonly kind: 'event' | 'query' | 'cron';
+  readonly successStatuses: readonly number[];
+  readonly parse: (response: Response, body: string) => T;
+}
 
 export class HttpTransport {
   readonly #config: ValidatedClientConfig;
@@ -50,7 +63,21 @@ export class HttpTransport {
     const body = serializeEvent(eventType, event);
     assertPayloadSize(body);
     const pathSegment = encodePathSegment(integrationId);
-    const url = `${this.#config.apiBaseUrl}/site-tracker/integrations/${pathSegment}/events`;
+    return this.request(
+      {
+        method: 'POST',
+        path: `/site-tracker/integrations/${pathSegment}/events`,
+        body,
+        kind: 'event',
+        successStatuses: [200, 202],
+        parse: parseSuccess,
+      },
+      signal,
+    );
+  }
+
+  public async request<T>(request: ApiRequest<T>, signal?: AbortSignal): Promise<T> {
+    const url = `${this.#config.apiBaseUrl}${request.path}`;
 
     for (let attempt = 1; attempt <= this.#config.retry.maxAttempts; attempt += 1) {
       if (signal?.aborted) {
@@ -63,9 +90,10 @@ export class HttpTransport {
       try {
         const response = await awaitWithSignal(
           this.#config.fetch(url, {
-            method: 'POST',
-            headers: this.#headers(),
-            body,
+            method: request.method,
+            headers: this.#headers(request.body !== undefined),
+            ...(request.body === undefined ? {} : { body: request.body }),
+            redirect: 'error',
             signal: attemptSignal.signal,
           }),
           attemptSignal.signal,
@@ -85,15 +113,27 @@ export class HttpTransport {
             this.#config.retry.maxDelayMs,
           );
           await awaitWithSignal(discardResponse(response), attemptSignal.signal);
-        } else if (response.status === 200 || response.status === 202) {
+        } else if (request.successStatuses.includes(response.status)) {
           const responseBody = await awaitWithSignal(
             readBoundedBody(response),
             attemptSignal.signal,
           );
-          return parseSuccess(response, responseBody);
+          try {
+            return request.parse(response, responseBody);
+          } catch (error) {
+            if (request.kind === 'cron' && error instanceof ViewMendInvalidResponseError) {
+              throw new ViewMendInvalidResponseError(
+                'ViewMend returned a malformed Cron response.',
+                response.status,
+                undefined,
+                safeHeader(response, 'X-Request-Id'),
+              );
+            }
+            throw error;
+          }
         } else {
           mayRetryAttemptFailure = false;
-          throw await awaitWithSignal(mapApiError(response), attemptSignal.signal);
+          throw await awaitWithSignal(mapApiError(response, request.kind), attemptSignal.signal);
         }
       } catch (error) {
         const normalizedError = normalizeAttemptError(error, attemptSignal);
@@ -119,13 +159,13 @@ export class HttpTransport {
     throw new ViewMendNetworkError('The ViewMend API could not be reached.');
   }
 
-  #headers(): Headers {
+  #headers(hasBody: boolean): Headers {
     const headers = new Headers({
       Accept: 'application/json',
       Authorization: `Bearer ${this.#config.apiToken}`,
-      'Content-Type': 'application/json',
       'X-ViewMend-SDK': `viewmend-js/${this.#sdkVersion}`,
     });
+    if (hasBody) headers.set('Content-Type', 'application/json');
 
     const processValue = (globalThis as { process?: { versions?: { node?: string } } }).process;
     if (typeof processValue?.versions?.node === 'string') {
@@ -297,8 +337,32 @@ function parseSuccess(response: Response, body: string): SiteTrackerDeliveryResu
   });
 }
 
-async function mapApiError(response: Response): Promise<ViewMendApiError> {
+async function mapApiError(
+  response: Response,
+  kind: 'event' | 'query' | 'cron',
+): Promise<ViewMendApiError> {
+  if (kind === 'cron') return mapCronError(response);
   const deliveryId = safeHeader(response, 'X-ViewMend-Delivery');
+  if (kind === 'query') {
+    if (response.status === 404) {
+      return new ViewMendResourceNotFoundError(
+        'The Site Tracker resource was not found in this integration.',
+        404,
+      );
+    }
+    if (response.status === 410) {
+      return new ViewMendEndpointDisabledError(
+        'The ViewMend Site Tracker read endpoint is disabled.',
+        410,
+      );
+    }
+    if (response.status === 422) {
+      return new ViewMendUnprocessableQueryError(
+        'ViewMend rejected the Site Tracker query parameters.',
+        422,
+      );
+    }
+  }
   const retryAfterMs = parseRetryAfter(response.headers.get('Retry-After'));
   const fields = response.status === 422 ? await validationFields(response) : [];
 
@@ -367,6 +431,68 @@ async function mapApiError(response: Response): Promise<ViewMendApiError> {
         deliveryId,
       );
   }
+}
+
+async function mapCronError(response: Response): Promise<ViewMendApiError> {
+  const requestId = safeHeader(response, 'X-Request-Id');
+  const status = response.status;
+  if (status === 401) {
+    let scopeError = false;
+    try {
+      const document = parseJsonObject(await readBoundedBody(response));
+      scopeError = isRecord(document.error) && document.error.code === 'token_scope_invalid';
+    } catch {
+      // Unreadable error bodies still represent authentication failures.
+    }
+    return scopeError
+      ? new ViewMendTokenScopeError(
+          'This Site Tracker token cannot access the Cron API. Use a Cron connection token.',
+          status,
+          undefined,
+          requestId,
+        )
+      : new ViewMendAuthenticationError(
+          'ViewMend rejected the Cron connection token.',
+          status,
+          undefined,
+          requestId,
+        );
+  }
+  if (status === 410)
+    return new ViewMendEndpointDisabledError(
+      'The ViewMend Cron connection is disabled.',
+      status,
+      undefined,
+      requestId,
+    );
+  if (status === 422)
+    return new ViewMendUnprocessableRegistrationError(
+      'ViewMend rejected the Cron schedule.',
+      status,
+      undefined,
+      requestId,
+    );
+  if (status === 429)
+    return new ViewMendRateLimitError(
+      'The ViewMend API rate limit was reached.',
+      status,
+      undefined,
+      parseRetryAfter(response.headers.get('Retry-After')),
+      requestId,
+    );
+  if (status >= 500)
+    return new ViewMendServerError(
+      'ViewMend could not process the Cron request.',
+      status,
+      undefined,
+      requestId,
+    );
+  return new ViewMendApiError(
+    'ViewMend returned an unexpected Cron HTTP status.',
+    status,
+    undefined,
+    requestId,
+  );
 }
 
 async function validationFields(response: Response): Promise<readonly string[]> {
@@ -448,7 +574,7 @@ function safeHeader(response: Response, name: string): string | undefined {
   return value;
 }
 
-function encodePathSegment(value: string): string {
+export function encodePathSegment(value: string): string {
   return encodeURIComponent(value).replace(
     /[!'()*]/g,
     (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,

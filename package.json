@@ -1,7 +1,7 @@
 {
   "name": "@viewmend/sdk",
-  "version": "1.0.0",
-  "description": "Official JavaScript and TypeScript SDK for ViewMend APIs, including server-side Site Tracker events.",
+  "version": "1.1.0",
+  "description": "Official JavaScript and TypeScript SDK for Site Tracker events, dashboards, resources, and signed Cron callbacks.",
   "keywords": [
     "api-client",
     "change-monitoring",

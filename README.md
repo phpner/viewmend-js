@@ -2,7 +2,7 @@
 
 The official server-side JavaScript and TypeScript SDK for [ViewMend](https://viewmend.com/), a website quality and operations platform for SEO checks, performance evidence, page review, and change monitoring.
 
-The first SDK module sends deployment and website-change context to [ViewMend Site Tracker](https://viewmend.com/site-tracker). Use it from Node.js services, Next.js server routes, Vercel Functions, or CI/CD jobs to connect a release or content change with the Site Tracker event timeline and, when the integration is configured to do so, queued checks of selected pages.
+The SDK sends deployment and website-change events, reads [ViewMend Site Tracker](https://viewmend.com/site-tracker) dashboards and resource inventories, and manages Cron schedules with signed callback verification. Use it from Node.js services, Next.js server routes, Vercel Functions, or CI/CD jobs.
 
 This package supports JavaScript website change monitoring, TypeScript deployment monitoring, Node.js Site Tracker integration, and Vercel deployment monitoring without a framework runtime dependency.
 
@@ -11,6 +11,8 @@ This package supports JavaScript website change monitoring, TypeScript deploymen
 - [ViewMend Site Tracker](https://viewmend.com/site-tracker)
 - [Events API setup guide](https://viewmend.com/guides/integrations/events-api)
 - [All ViewMend integrations](https://viewmend.com/guides/integrations)
+- [Dashboard and resource reads](#site-tracker-dashboard-and-resources)
+- [Cron schedules and callbacks](#cron-schedules-and-callbacks)
 - [SDK issues and feature requests](https://github.com/phpner/viewmend-js/issues)
 
 ## Installation
@@ -74,13 +76,13 @@ const viewmend = new ViewMend({
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `apiToken` | required | Bearer token from a custom Site Tracker Events API connection. |
-| `apiBaseUrl` | `https://viewmend.com/api/v1` | Versioned API base. Override only for an environment provided by ViewMend support or a local contract test. |
+| `apiToken` | required | Site Tracker API token or Cron connection token, depending on the module. These token scopes are separate. |
+| `apiBaseUrl` | `https://viewmend.com/api/v1` | Versioned API base. Supports self-hosted and local ViewMend environments. |
 | `fetch` | `globalThis.fetch` | Standards-compatible custom fetch implementation. |
 | `timeoutMs` | `10000` | Per-attempt timeout, from 1 ms to 5 minutes. |
 | `retry` | 3 attempts | Set to `false` to disable retries, or provide bounded retry settings. |
 
-Configuration and event validation happen before the request. The client has no singleton state and does not modify global fetch, timers, logging, or framework configuration.
+Configuration, event, query, and registration validation happen before the request. Constructing a client or selecting a module performs no I/O. The client has no singleton state and does not modify global fetch, timers, logging, or framework configuration.
 
 ## Supported runtimes
 
@@ -96,6 +98,132 @@ Configuration and event validation happen before the request. The client has no 
 The distribution contains no Node built-in imports and is checked with a browser-platform bundle smoke test. That check is useful protection against accidental Node coupling, but it is not presented as full Cloudflare Workers, Bun, Deno, or Vercel Edge certification. Those runtimes are not currently part of the release matrix.
 
 Node.js 20 and earlier are not supported. Node.js 20 reached end of life before this package's first release.
+
+## Site Tracker dashboard and resources
+
+Available since JavaScript SDK 1.1.0, matching the read contract in PHP SDK 1.3.0. These methods use the same integration ID and Bearer token as events.
+
+```ts
+const tracker = viewmend.siteTracker(integrationId);
+const dashboard = await tracker.dashboard();
+const mobile = await tracker.dashboard({
+  pageId: dashboard.scope.availablePages[0]?.id ?? null,
+  device: 'mobile',
+});
+
+console.log(mobile.summary.healthScore, mobile.needsAttention.items);
+```
+
+`dashboard(options?)` makes `GET /site-tracker/integrations/{integration}/dashboard`. Omit `pageId` (or pass `null`) to select the homepage or first active page. A supplied page ID must be a UUID. `device` is `desktop` by default or `mobile`. Both read methods accept an optional `signal: AbortSignal`.
+
+The immutable `SiteTrackerDashboardResult` contains:
+
+| Property | Contents |
+| --- | --- |
+| `site` | Group ID and name |
+| `scope` | Device, nullable selected page, and available active pages |
+| `summary` | Health score/delta, page counts, open/critical issue counts |
+| `latestCheck` | Nullable run ID, status, finish time, and comparison availability |
+| `links` | Nullable workspace paths for issues and issue/resource/performance history |
+| `needsAttention` | Total and up to 10 attention items across active pages |
+| `issueTrend` | Critical/warning counts for the selected page's recent checks |
+| `transfer` | Transfer bytes, categories, stored/reported requests, and truncation |
+| `resourceChanges` | Comparison availability and changed resources |
+| `performanceHistory` | Performance score, LCP, CLS, and total blocking time |
+| `generatedAt` | Server response time |
+
+Page and issue counts cover active pages in the integration's group. Health, the latest check, and histories describe the selected page; `device` selects device-specific evidence. History contains at most 30 finished checks. Attention totals may exceed the number of returned items.
+
+All nested objects and arrays are frozen, with exported TypeScript interfaces. Timestamps are validated RFC 3339 strings that preserve fractional precision. Missing measurements remain `null`; zero remains zero. Server-defined status, severity, source, and change-type values remain open strings.
+
+With no active pages, `scope.page` and `latestCheck` are null, collections are empty, and workspace links normalize to null. An active page without finished checks also has a null `latestCheck`. Check `transfer.available` and `resourceChanges.available` before displaying their evidence.
+
+```ts
+if (dashboard.transfer.available && dashboard.transfer.runId) {
+  const resources = await tracker.resources({
+    runId: dashboard.transfer.runId,
+    type: 'javascript',
+    device: 'desktop',
+    page: 1,
+    perPage: 50,
+  });
+  console.log(resources.items, resources.pagination, resources.summary.truncated);
+}
+```
+
+`resources(options)` makes `GET /site-tracker/integrations/{integration}/runs/{run}/resources`. `runId` and `type` are required. Type accepts `images`, `javascript`, `css`, or `other`. Defaults are `device: 'desktop'`, `page: 1`, and `perPage: 50`; `perPage` accepts 1–300. Page numbers are positive safe integers.
+
+`SiteTrackerResourcesResult` has `run`, `type`, `device`, `summary`, `items`, `pagination`, and `generatedAt`. Items expose `url`, nullable `mimeType`, `statusCode`, `transferredBytes`, and `durationMs`, plus `thirdParty` and `renderBlocking` booleans. Raw headers, remote IPs, and collector data are excluded.
+
+Each call fetches one page. Compare `pagination.page` with `pagination.lastPage` to fetch more using the same run, type, and device. Empty inventories have `items: []` and `lastPage: 1`; requests beyond the last page can also return an empty list. Summary category counts and bytes cover all stored rows, independently of pagination. Overall `storedRequests`, `reportedRequests`, and `truncated` describe capture completeness; additional pages cannot recover resources that were never stored.
+
+HTTP 404 throws `ViewMendResourceNotFoundError` (also a `ViewMendNotFoundError`), including an out-of-scope page or run. HTTP 422 throws `ViewMendUnprocessableQueryError`; neither becomes an empty result. Malformed successes throw `ViewMendInvalidResponseError` without retrying. Reads share bounded retries, timeouts, and cancellation with events. The SDK constructs URLs from `apiBaseUrl` and never automatically follows response links or `transfer.resourceEndpoint`.
+
+## Cron schedules and callbacks
+
+Available since JavaScript SDK 1.1.0, matching the neutral registration contract in PHP SDK 1.2.0. Create a Cron connection in ViewMend with a name and domain, then store its connection token on the server. Use a separate client from Site Tracker because the tokens have different scopes.
+
+```ts
+const cron = new ViewMend({ apiToken: process.env.VIEWMEND_CRON_TOKEN! }).cron();
+
+const registration = await cron.register({
+  cron: '*/15 * * * *',
+  timezone: 'Europe/London',
+  endpointPath: '/cron',
+  enabled: true,
+});
+
+const current = await cron.current();
+// When the user chooses to pause their schedule:
+await cron.disable();
+```
+
+`register()` sends `PUT /cron/registration`; `current()` sends GET; `disable()` sends DELETE. All use the configured versioned API base. These operations are safe to repeat and use the same bounded retry policy. Every method accepts `signal` in its options object. `enabled` defaults to true.
+
+Register a five-field cron expression, IANA timezone, and absolute callback path. ViewMend validates the schedule and minimum interval, combines the path with the connected domain, and sends POST. The client cannot choose a host, method, headers, or body. New or changed endpoints remain `pending_verification` until verification succeeds. HTTPS is required except for local development on loopback hosts and `host.docker.internal`.
+
+`CronRegistrationResult` exposes `id`, `connectionId`, `domain`, `endpointPath`, `endpointUrl`, `method`, `cron`, `timezone`, `enabled`, `status`, `verifiedAt`, `nextRunAt`, `lastRunAt`, `consecutiveFailures`, and `updatedAt`. Dates are RFC 3339 strings or null. Results are frozen and future statuses are preserved.
+
+ViewMend is the source of truth for saved settings: call `current()` when opening a settings screen and use the result of `register()` immediately after saving. Only `404 registration_not_found` becomes null. Other HTTP/network failures remain errors; keep cached settings marked stale instead of replacing them with defaults. HTTP 401 with `token_scope_invalid` throws `ViewMendTokenScopeError`, a subclass of `ViewMendAuthenticationError`; 410 throws `ViewMendEndpointDisabledError`; 422 throws `ViewMendUnprocessableRegistrationError`. Cron API errors expose a bounded `requestId` when available.
+
+Verify incoming callbacks before executing any scheduled work. This framework-neutral example accepts a standard `Request` and a durable job handler supplied by your application:
+
+```ts
+import { ViewMendCallbackVerificationError, type CronCallback } from '@viewmend/sdk';
+
+async function handleCronRequest(
+  request: Request,
+  executeOnce: (callback: CronCallback) => Promise<void>,
+): Promise<Response> {
+  if (request.method !== 'POST') return new Response(null, { status: 405 });
+  let callback: CronCallback;
+  try {
+    callback = await cron.verifyCallback(
+      request.headers,
+      new Uint8Array(await request.arrayBuffer()),
+    );
+  } catch (error) {
+    if (error instanceof ViewMendCallbackVerificationError) {
+      return new Response(null, { status: 401 });
+    }
+    throw error;
+  }
+
+  if (callback.isVerification()) {
+    return new Response(callback.verificationResponseBody(), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  await executeOnce(callback);
+  return new Response(null, { status: 204 });
+}
+```
+
+`verifyCallback(headers, rawBody)` accepts `Headers` or a record of string/single-value-array headers, plus a raw string or `Uint8Array` body. It verifies HMAC-SHA256 over `timestamp + '.' + rawBody` using Web Crypto, rejects timestamps more than five minutes from the local clock, checks connection and run IDs, and rejects duplicate signing headers and malformed payloads. Do not parse and re-encode JSON before verification. Verification performs no network I/O; it is also available separately through `CronCallbackVerifier.fromToken(token).verify(headers, rawBody)`.
+
+Callbacks expose `type`, `runId`, `connectionId`, `jobId`, `scheduledAt`, `attempt`, and nullable `challenge`, with `isRun()`, `isVerification()`, and `verificationResponseBody()` helpers. Delivery is at least once: persist completed `runId` values and make `executeOnce` prevent duplicate side effects, including concurrent attempts. The same logical run keeps its ID while `attempt` increases. Return 2xx only after successful work; never log tokens, signatures, or signing secrets.
 
 ## Site Tracker events
 
@@ -246,11 +374,11 @@ More connection-specific setup is available in the [ViewMend integrations guide]
 
 Each request attempt has a 10-second timeout by default. The SDK retries only when all of these conditions hold:
 
-- the event has its required stable ID;
+- the operation is safe to repeat (an event with its required stable ID, a Site Tracker read, or a Cron registration/current/disable request);
 - fewer than `maxAttempts` attempts have been made;
 - fetch failed at the network/timeout boundary, or the API returned `429`, `500`, `502`, `503`, or `504`.
 
-The serialized request body and event ID are identical across attempts. The SDK does not retry permanent `4xx` responses. `Retry-After` supports both delta-seconds and HTTP-date values and is capped by `maxDelayMs`.
+The URL, method, serialized body, and event ID are identical across attempts. The SDK does not retry permanent `4xx` responses, malformed successes, or caller cancellation. `Retry-After` supports both delta-seconds and HTTP-date values and is capped by `maxDelayMs`. Redirects are disabled.
 
 Disable retries for latency-sensitive code:
 
@@ -310,14 +438,19 @@ try {
 | Error | Condition |
 | --- | --- |
 | `ViewMendConfigurationError` | invalid token, base URL, timeout, retry settings, or missing fetch |
-| `ViewMendValidationError` | invalid event before network I/O |
+| `ViewMendValidationError` | invalid event, read query, or Cron options before network I/O |
 | `ViewMendAuthenticationError` | HTTP 401 |
+| `ViewMendTokenScopeError` | Cron rejects a Site Tracker token with `401 token_scope_invalid`; extends `ViewMendAuthenticationError` |
 | `ViewMendAuthorizationError` | HTTP 403 |
 | `ViewMendNotFoundError` | HTTP 404 integration/endpoint not found |
+| `ViewMendResourceNotFoundError` | HTTP 404 on a Site Tracker read; extends `ViewMendNotFoundError` |
 | `ViewMendConflictError` | HTTP 409 resource-state conflict; normal duplicate event IDs use the successful `duplicate` result instead |
 | `ViewMendEndpointDisabledError` | HTTP 410 |
 | `ViewMendPayloadTooLargeError` | HTTP 413 |
-| `ViewMendUnprocessableEventError` | HTTP 422; safe field names are available in `fields` |
+| `ViewMendUnprocessableEventError` | HTTP 422 on event delivery; bounded field names are available in `fields` |
+| `ViewMendUnprocessableQueryError` | HTTP 422 on a Site Tracker read |
+| `ViewMendUnprocessableRegistrationError` | HTTP 422 on Cron registration |
+| `ViewMendCallbackVerificationError` | Invalid Cron connection token, signature, signing headers, timestamp, or callback payload |
 | `ViewMendRateLimitError` | exhausted HTTP 429 retries |
 | `ViewMendServerError` | exhausted HTTP 5xx retries |
 | `ViewMendNetworkError` | exhausted network retries or unreadable response |
@@ -352,7 +485,7 @@ Send only operational context needed to identify the change and affected tracked
 - Omit `metadata` when the typed fields already explain the event.
 - Review retention and access controls in the ViewMend account used by your team.
 
-The SDK sends no telemetry of its own and has no hidden network calls. Calling an event helper is the single explicit ViewMend API side effect.
+The SDK sends no telemetry of its own and has no hidden network calls. Event helpers, dashboard/resources reads, and Cron register/current/disable calls each perform the requested API operation, with bounded retries. Callback verification stays local.
 
 ## Upgrade and versioning policy
 

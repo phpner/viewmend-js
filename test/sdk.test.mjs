@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 
 import {
@@ -21,6 +22,8 @@ import {
   isKnownQueueStatus,
   siteTrackerEventTypes,
 } from '../dist/index.js';
+
+const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
 const successBody = {
   delivery_id: 'delivery-123',
@@ -86,8 +89,8 @@ describe('Site Tracker contract', () => {
     assert.equal(headers.get('Accept'), 'application/json');
     assert.equal(headers.get('Content-Type'), 'application/json');
     assert.equal(headers.get('Authorization'), 'Bearer test-api-token');
-    assert.equal(headers.get('X-ViewMend-SDK'), 'viewmend-js/1.0.0');
-    assert.equal(headers.get('User-Agent'), 'viewmend-js/1.0.0');
+    assert.equal(headers.get('X-ViewMend-SDK'), `viewmend-js/${version}`);
+    assert.equal(headers.get('User-Agent'), `viewmend-js/${version}`);
     assert.equal(headers.has('X-ViewMend-Timestamp'), false);
     assert.deepEqual(JSON.parse(init.body), {
       event_id: 'deploy-123',
@@ -223,7 +226,9 @@ describe('validation', () => {
       return successResponse();
     });
 
-    assert.throws(() => viewmend.siteTracker('   '), ViewMendValidationError);
+    for (const integrationId of ['   ', '.', '..', '\ud800']) {
+      assert.throws(() => viewmend.siteTracker(integrationId), ViewMendValidationError);
+    }
     await assert.rejects(
       viewmend.siteTracker('integration').events.custom({ id: '', title: 'Title' }),
       ViewMendValidationError,

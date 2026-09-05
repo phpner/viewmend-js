@@ -1,3 +1,10 @@
+import type {
+  SiteTrackerDashboardOptions,
+  SiteTrackerDashboardResult,
+  SiteTrackerResourcesOptions,
+  SiteTrackerResourcesResult,
+} from './site-tracker-types.js';
+
 export const siteTrackerEventTypes = Object.freeze([
   'deployment',
   'content_update',
@@ -98,4 +105,6 @@ export interface SiteTrackerEvents {
 
 export interface SiteTrackerClient {
   readonly events: SiteTrackerEvents;
+  dashboard(options?: SiteTrackerDashboardOptions): Promise<SiteTrackerDashboardResult>;
+  resources(options: SiteTrackerResourcesOptions): Promise<SiteTrackerResourcesResult>;
 }

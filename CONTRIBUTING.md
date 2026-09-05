@@ -22,7 +22,7 @@ The package intentionally has no runtime dependencies. A production dependency r
 
 ## Change expectations
 
-- Preserve the small `ViewMend → siteTracker → events` public surface.
+- Keep module access through `ViewMend.siteTracker()` and `ViewMend.cron()`, preserving existing event methods.
 - Keep the shared path compatible with standard fetch, `Request`, `Response`, and `AbortSignal` APIs.
 - Add or update contract tests for every wire change.
 - Test both accepted and duplicate delivery behavior when changing event sending.

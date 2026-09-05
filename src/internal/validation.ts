@@ -84,7 +84,22 @@ export function validateClientOptions(options: ViewMendOptions): ValidatedClient
 }
 
 export function validateIntegrationId(value: string): string {
-  return assertString(value, 'Site Tracker integration ID', 255, true);
+  return validatePathId(value, 'Site Tracker integration ID');
+}
+
+export function validatePathId(value: string, field: string): string {
+  const result = assertString(value, field, 255, true);
+  if (
+    result === '.' ||
+    result === '..' ||
+    [...result].some((character) => {
+      const point = character.codePointAt(0) ?? 0;
+      return point >= 0xd800 && point <= 0xdfff;
+    })
+  ) {
+    throw new ViewMendValidationError(`${field} is invalid.`, field);
+  }
+  return result;
 }
 
 export function validateEventInput(input: SiteTrackerEventInput): ValidatedEvent {
@@ -393,7 +408,7 @@ function hasControlCharacters(value: string): boolean {
   });
 }
 
-function isAbortSignal(value: unknown): value is AbortSignal {
+export function isAbortSignal(value: unknown): value is AbortSignal {
   return (
     typeof value === 'object' &&
     value !== null &&
