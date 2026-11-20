@@ -6,6 +6,8 @@ The SDK sends deployment and website-change events, reads [ViewMend Site Tracker
 
 This package supports JavaScript website change monitoring, TypeScript deployment monitoring, Node.js Site Tracker integration, and Vercel deployment monitoring without a framework runtime dependency.
 
+ViewMend also offers free one-page checks that need no integration: the [website SEO checker](https://viewmend.com/seo-checker) reviews indexability, titles, descriptions, headings and structured data, and the [website spell checker](https://viewmend.com/page-text-review) finds spelling and grammar errors in published page text.
+
 ## Documentation
 
 - [ViewMend Site Tracker](https://viewmend.com/site-tracker)
